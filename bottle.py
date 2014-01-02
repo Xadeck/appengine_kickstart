@@ -16,7 +16,7 @@ License: MIT (see LICENSE for details)
 from __future__ import with_statement
 
 __author__ = 'Marcel Hellkamp'
-__version__ = '0.13-dev'
+__version__ = '0.12.0'
 __license__ = 'MIT'
 
 # The gevent server adapter needs to patch some modules before they are imported
@@ -117,13 +117,8 @@ else: # 2.x
 # Some helpers for string/byte handling
 def tob(s, enc='utf8'):
     return s.encode(enc) if isinstance(s, unicode) else bytes(s)
-
 def touni(s, enc='utf8', err='strict'):
-    if isinstance(s, bytes):
-        return s.decode(enc, err)
-    else:
-        return unicode(s or ("" if s is None else s))
-
+    return s.decode(enc, err) if isinstance(s, bytes) else unicode(s)
 tonat = touni if py3k else tob
 
 # 3.2 fixes cgi.FieldStorage to accept bytes (which makes a lot of sense).
@@ -479,6 +474,12 @@ class Route(object):
         #: plugin configuration and meta-data.
         self.config = ConfigDict().load_dict(config)
 
+    def __call__(self, *a, **ka):
+        depr("Some APIs changed to return Route() instances instead of"\
+             " callables. Make sure to use the Route.call method and not to"\
+             " call Route instances directly.") #0.12
+        return self.call(*a, **ka)
+
     @cached_property
     def call(self):
         ''' The route callback with all plugins applied. This property is
@@ -493,6 +494,13 @@ class Route(object):
     def prepare(self):
         ''' Do all on-demand work immediately (useful for debugging).'''
         self.call
+
+    @property
+    def _context(self):
+        depr('Switch to Plugin API v2 and access the Route object directly.')  #0.12
+        return dict(rule=self.rule, method=self.method, callback=self.callback,
+                    name=self.name, app=self.app, config=self.config,
+                    apply=self.plugins, skip=self.skiplist)
 
     def all_plugins(self):
         ''' Yield all Plugins affecting this route. '''
@@ -510,7 +518,9 @@ class Route(object):
         for plugin in self.all_plugins():
             try:
                 if hasattr(plugin, 'apply'):
-                    callback = plugin.apply(callback, self)
+                    api = getattr(plugin, 'api', 1)
+                    context = self if api > 1 else self._context
+                    callback = plugin.apply(callback, context)
                 else:
                     callback = plugin(callback)
             except RouteReset: # Try again with changed configuration.
@@ -644,6 +654,8 @@ class Bottle(object):
 
             All other parameters are passed to the underlying :meth:`route` call.
         '''
+        if isinstance(app, basestring):
+            depr('Parameter order of Bottle.mount() changed.', True) # 0.10
 
         segments = [p for p in prefix.split('/') if p]
         if not segments: raise ValueError('Empty path prefix.')
@@ -1624,7 +1636,8 @@ class BaseResponse(object):
         return out
 
 
-def _local_property():
+def local_property(name=None):
+    if name: depr('local_property() is deprecated and will be removed.') #0.12
     ls = threading.local()
     def fget(self):
         try: return ls.var
@@ -1642,7 +1655,7 @@ class LocalRequest(BaseRequest):
         request/response cycle, this instance always refers to the *current*
         request (even on a multithreaded server). '''
     bind = BaseRequest.__init__
-    environ = _local_property()
+    environ = local_property()
 
 
 class LocalResponse(BaseResponse):
@@ -1652,11 +1665,11 @@ class LocalResponse(BaseResponse):
         to build the HTTP response at the end of the request/response cycle.
     '''
     bind = BaseResponse.__init__
-    _status_line = _local_property()
-    _status_code = _local_property()
-    _cookies     = _local_property()
-    _headers     = _local_property()
-    body         = _local_property()
+    _status_line = local_property()
+    _status_code = local_property()
+    _cookies     = local_property()
+    _headers     = local_property()
+    body         = local_property()
 
 
 Request = BaseRequest
@@ -1980,9 +1993,12 @@ class ConfigDict(dict):
 
     __slots__ = ('_meta', '_on_change')
 
-    def __init__(self):
+    def __init__(self, *a, **ka):
         self._meta = {}
         self._on_change = lambda name, value: None
+        if a or ka:
+            depr('Constructor does no longer accept parameters.') #0.12
+            self.update(*a, **ka)
 
     def load_config(self, filename):
         ''' Load values from an *.ini style config file.
@@ -2060,6 +2076,32 @@ class ConfigDict(dict):
     def meta_list(self, key):
         ''' Return an iterable of meta field names defined for a key. '''
         return self._meta.get(key, {}).keys()
+
+    # Deprecated ConfigDict features
+    def __getattr__(self, key):
+        depr('Attribute access is deprecated.') #0.12
+        if key not in self and key[0].isupper():
+            self[key] = ConfigDict()
+        return self.get(key)
+
+    def __setattr__(self, key, value):
+        if key in self.__slots__:
+            return dict.__setattr__(self, key, value)
+        depr('Attribute assignment is deprecated.') #0.12
+        if hasattr(dict, key):
+            raise AttributeError('Read-only attribute.')
+        if key in self and self[key] and isinstance(self[key], ConfigDict):
+            raise AttributeError('Non-empty namespace attribute.')
+        self[key] = value
+
+    def __delattr__(self, key):
+        if key in self: del self[key]
+
+    def __call__(self, *a, **ka):
+        depr('Calling ConfDict is deprecated. Use the update() method.') #0.12
+        self.update(*a, **ka)
+        return self
+
 
 
 class AppStack(list):
@@ -3078,11 +3120,11 @@ class BaseTemplate(object):
         """ Search name in all directories specified in lookup.
         First without, then with common extensions. Return first hit. """
         if not lookup:
-            depr('The template lookup path list should not be empty.', True) #0.12
+            depr('The template lookup path list should not be empty.') #0.12
             lookup = ['.']
 
         if os.path.isabs(name) and os.path.isfile(name):
-            depr('Absolute template path names are deprecated.', True) #0.12
+            depr('Absolute template path names are deprecated.') #0.12
             return os.path.abspath(name)
 
         for spath in lookup:
@@ -3162,6 +3204,9 @@ class CheetahTemplate(BaseTemplate):
 class Jinja2Template(BaseTemplate):
     def prepare(self, filters=None, tests=None, globals={}, **kwargs):
         from jinja2 import Environment, FunctionLoader
+        if 'prefix' in kwargs: # TODO: to be removed after a while
+            raise RuntimeError('The keyword argument `prefix` has been removed. '
+                'Use the full jinja2 environment name line_statement_prefix instead.')
         self.env = Environment(loader=FunctionLoader(self.loader), **kwargs)
         if filters: self.env.filters.update(filters)
         if tests: self.env.tests.update(tests)
@@ -3213,9 +3258,15 @@ class SimpleTemplate(BaseTemplate):
         return code
 
     def _rebase(self, _env, _name=None, **kwargs):
+        if _name is None:
+            depr('Rebase function called without arguments.'
+                 ' You were probably looking for {{base}}?', True) #0.12
         _env['_rebase'] = (_name, kwargs)
 
     def _include(self, _env, _name=None, **kwargs):
+        if _name is None:
+            depr('Rebase function called without arguments.'
+                 ' You were probably looking for {{base}}?', True) #0.12
         env = _env.copy()
         env.update(kwargs)
         if _name not in self.cache:
@@ -3272,7 +3323,7 @@ class StplParser(object):
     # 7: And finally, a single newline. The 8th token is 'everything else'
     _re_tok += '|(\\r?\\n)'
     # Match the start tokens of code areas in a template
-    _re_split = '(?m)^[ \t]*(\\\\?)((%(line_start)s)|(%(block_start)s))'
+    _re_split = '(?m)^[ \t]*(\\\\?)((%(line_start)s)|(%(block_start)s))(%%?)'
     # Match inline statements (may contain python strings)
     _re_inl = '%%(inline_start)s((?:%s|[^\'"\n]*?)+)%%(inline_end)s' % _re_inl
 
@@ -3311,7 +3362,13 @@ class StplParser(object):
                 text = self.source[self.offset:self.offset+m.start()]
                 self.text_buffer.append(text)
                 self.offset += m.end()
-                if m.group(1): # Escape syntax
+                if m.group(1): # New escape syntax
+                    line, sep, _ = self.source[self.offset:].partition('\n')
+                    self.text_buffer.append(m.group(2)+m.group(5)+line+sep)
+                    self.offset += len(line+sep)+1
+                    continue
+                elif m.group(5): # Old escape syntax
+                    depr('Escape code lines with a backslash.') #0.12
                     line, sep, _ = self.source[self.offset:].partition('\n')
                     self.text_buffer.append(m.group(2)+line+sep)
                     self.offset += len(line+sep)+1
@@ -3383,9 +3440,27 @@ class StplParser(object):
         return '_escape(%s)' % chunk
 
     def write_code(self, line, comment=''):
+        line, comment = self.fix_backward_compatibility(line, comment)
         code  = '  ' * (self.indent+self.indent_mod)
         code += line.lstrip() + comment + '\n'
         self.code_buffer.append(code)
+
+    def fix_backward_compatibility(self, line, comment):
+        parts = line.strip().split(None, 2)
+        if parts and parts[0] in ('include', 'rebase'):
+            depr('The include and rebase keywords are functions now.') #0.12
+            if len(parts) == 1:   return "_printlist([base])", comment
+            elif len(parts) == 2: return "_=%s(%r)" % tuple(parts), comment
+            else:                 return "_=%s(%r, %s)" % tuple(parts), comment
+        if self.lineno <= 2 and not line.strip() and 'coding' in comment:
+            m = re.match(r"#.*coding[:=]\s*([-\w.]+)", comment)
+            if m:
+                depr('PEP263 encoding strings in templates are deprecated.') #0.12
+                enc = m.group(1)
+                self.source = self.source.encode(self.encoding).decode(enc)
+                self.encoding = enc
+                return line, comment.replace('coding','coding*')
+        return line, comment
 
 
 def template(*args, **kwargs):
