@@ -1,4 +1,4 @@
-findmeonmap
-===========
+AppEngine Kickstart
+===================
 
-Custom tool for friends to find themselves on a map
+A minimalistic skeleton application for quickly prototyping with AppEngine.
