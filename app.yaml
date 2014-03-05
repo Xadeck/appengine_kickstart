@@ -1,4 +1,4 @@
-application: findmeonmap
+application: btk-gae-kickstart
 version: 1
 runtime: python27
 threadsafe: true
